@@ -1,0 +1,55 @@
+# Custom Dockerfile for SAP Cloud Foundry deployment
+# Force HTTP/1.1 by using gunicorn instead of uvicorn
+
+ARG BASE_IMAGE=gcr.io/distroless/python3-debian12:nonroot
+
+# Frontend build stage - force AMD64
+FROM --platform=linux/amd64 node:22-slim AS frontend-builder
+ENV PNPM_HOME="/pnpm"
+ENV PATH="$PNPM_HOME:$PATH"
+WORKDIR /phoenix/app/
+COPY ./app /phoenix/app
+RUN npm i -g corepack
+RUN corepack enable
+RUN corepack use pnpm
+RUN pnpm install
+RUN pnpm run build
+
+# Backend build stage - force AMD64
+FROM --platform=linux/amd64 python:3.11-bullseye as backend-builder
+WORKDIR /phoenix
+COPY ./src /phoenix/src
+COPY ./pyproject.toml /phoenix/
+COPY ./LICENSE /phoenix/
+COPY ./IP_NOTICE /phoenix/
+COPY ./README.md /phoenix/
+COPY --from=frontend-builder /phoenix/src/phoenix/server/static/ /phoenix/src/phoenix/server/static/
+# Delete symbolic links used during development
+RUN find src/ -xtype l -delete
+RUN pip install --target ./env ".[container, pg]" gunicorn
+
+# Production stage - force AMD64
+FROM --platform=linux/amd64 python:3.11-slim
+WORKDIR /phoenix
+COPY --from=backend-builder /phoenix/env/ ./env
+
+# Environment variables
+ENV PYTHONPATH="/phoenix/env:$PYTHONPATH"
+ENV PYTHONUNBUFFERED=1
+
+# SAP Cloud Foundry specific configurations
+ENV PHOENIX_PORT=8080
+ENV PHOENIX_HOST=0.0.0.0
+ENV PHOENIX_HTTP_PORT=8080
+ENV PHOENIX_GRPC_PORT=0
+ENV PHOENIX_SERVE_UI=true
+ENV PORT=8080
+
+# Create a simple startup script to disable gRPC and force HTTP/1.1
+RUN echo '#!/bin/bash\nexport PHOENIX_GRPC_PORT=0\npython -m phoenix.server.main serve' > /start.sh && chmod +x /start.sh
+
+# Cloud Foundry expects apps to listen on $PORT
+EXPOSE $PORT
+
+# Run Phoenix with gRPC disabled
+CMD ["/start.sh"]
